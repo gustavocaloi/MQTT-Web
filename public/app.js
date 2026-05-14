@@ -21,7 +21,8 @@ const state = {
   queuedEvents: [],
   expandedPaths: new Set(),
   openedMessages: new Set(),
-  unreadPaths: new Set(),
+  flashingPaths: new Set(),
+  flashTimers: new Map(),
   pageByPath: new Map(),
   visibleChildrenByPath: new Map(),
   messagePages: new Map(),
@@ -115,7 +116,7 @@ function applyEvent(payload) {
     state.topics.set(topicName, payload.data.topic);
     state.totalMessages = payload.data.totalMessages;
     state.topicCount = payload.data.topicCount;
-    markUnread(topicName);
+    flashTopic(topicName);
     applyLiveMessage(topicName, payload.data.message);
   }
 }
@@ -136,7 +137,7 @@ function applySnapshot(snapshot) {
 function resetLocalMessageState() {
   state.expandedPaths.clear();
   state.openedMessages.clear();
-  state.unreadPaths.clear();
+  clearTopicFlashes();
   state.pageByPath.clear();
   state.visibleChildrenByPath.clear();
   state.messagePages.clear();
@@ -144,12 +145,37 @@ function resetLocalMessageState() {
   state.queuedEvents = [];
 }
 
-function markUnread(topicName) {
+function flashTopic(topicName) {
   getTopicSegments(topicName).reduce((prefix, segment) => {
     const path = prefix ? `${prefix}/${segment}` : segment;
-    state.unreadPaths.add(path);
+    state.flashingPaths.add(path);
+    resetFlashTimer(path);
     return path;
   }, '');
+}
+
+function resetFlashTimer(path) {
+  const currentTimer = state.flashTimers.get(path);
+  if (currentTimer) {
+    window.clearTimeout(currentTimer);
+  }
+
+  const timer = window.setTimeout(() => {
+    state.flashingPaths.delete(path);
+    state.flashTimers.delete(path);
+    scheduleRender();
+  }, 3500);
+
+  state.flashTimers.set(path, timer);
+}
+
+function clearTopicFlashes() {
+  for (const timer of state.flashTimers.values()) {
+    window.clearTimeout(timer);
+  }
+
+  state.flashingPaths.clear();
+  state.flashTimers.clear();
 }
 
 function renderAll() {
@@ -258,7 +284,7 @@ function renderTopicNode(topicNode, depth) {
   node.style.setProperty('--depth', depth);
   node.classList.toggle('expanded', isExpanded);
   node.classList.toggle('leaf', !hasChildren);
-  node.classList.toggle('has-new', state.unreadPaths.has(topicNode.path));
+  node.classList.toggle('has-new', state.flashingPaths.has(topicNode.path));
   title.textContent = topicNode.label;
   meta.textContent = createTopicMeta(topicNode, hasChildren, hasMessages);
   count.textContent = topicNode.count;
@@ -321,7 +347,6 @@ function toggleTopic(path) {
     state.expandedPaths.add(path);
   }
 
-  clearUnreadBranch(path);
   renderTopics();
 }
 
@@ -404,14 +429,6 @@ function renderPagination(path, currentPage, totalPages, totalMessages, pageSize
 
   nav.replaceChildren(previous, summary, next);
   return nav;
-}
-
-function clearUnreadBranch(path) {
-  for (const unreadPath of Array.from(state.unreadPaths)) {
-    if (unreadPath === path || unreadPath.startsWith(`${path}/`)) {
-      state.unreadPaths.delete(unreadPath);
-    }
-  }
 }
 
 function renderMessage(message) {
