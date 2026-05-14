@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MQTT Web</title>
+    <link rel="stylesheet" href="/styles.css?v=20260513-7" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Monitor MQTT</p>
+          <h1>Mensagens por topico</h1>
+        </div>
+        <div class="status-card" id="connectionStatus">
+          <span class="status-dot"></span>
+          <div>
+            <strong>Conectando</strong>
+            <small>Aguardando broker</small>
+          </div>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Resumo">
+        <article>
+          <span id="topicCount">0</span>
+          <p>Topicos</p>
+        </article>
+        <article>
+          <span id="messageCount">0</span>
+          <p>Mensagens</p>
+        </article>
+        <article>
+          <span id="brokerUrl">-</span>
+          <p>Broker</p>
+        </article>
+        <article>
+          <span id="topicFilter">#</span>
+          <p>Filtro</p>
+        </article>
+      </section>
+
+      <section class="toolbar" aria-label="Ferramentas">
+        <label class="search">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m21 21-4.3-4.3m1.3-5.2a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0Z" />
+          </svg>
+          <input id="searchInput" type="search" placeholder="Filtrar topicos, ex: flight/#" autocomplete="off" />
+        </label>
+        <button id="pauseButton" type="button" aria-pressed="false">
+          <span class="pause-icon"></span>
+          Pausar
+        </button>
+        <button id="clearButton" class="danger-button" type="button">
+          Limpar
+        </button>
+      </section>
+
+      <section class="notice">
+        O MQTT exibe mensagens retidas pelo broker e tudo que chegar apos a assinatura em tempo real.
+      </section>
+
+      <section id="topics" class="topics" aria-live="polite">
+        <div class="empty-state">
+          <h2>Nenhuma mensagem recebida ainda</h2>
+          <p>Assim que o broker publicar algo no filtro configurado, os topicos aparecem aqui.</p>
+        </div>
+      </section>
+    </main>
+
+    <template id="topicNodeTemplate">
+      <article class="topic-node">
+        <div class="topic-row">
+          <button class="topic-toggle" type="button">
+            <span class="topic-caret" aria-hidden="true"></span>
+            <div>
+              <h2></h2>
+              <p></p>
+            </div>
+            <span class="topic-count"></span>
+          </button>
+          <button class="topic-filter" type="button" title="Filtrar por este topico" aria-label="Filtrar por este topico">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z" />
+            </svg>
+          </button>
+        </div>
+        <div class="topic-children"></div>
+      </article>
+    </template>
+
+    <template id="messageTemplate">
+      <article class="message">
+        <button class="message-summary" type="button">
+          <span class="message-time"></span>
+          <span class="badge"></span>
+          <span class="badge retained">retained</span>
+        </button>
+        <pre hidden></pre>
+      </article>
+    </template>
+
+    <script src="/app.js?v=20260513-7" type="module"></script>
+  </body>
+</html>

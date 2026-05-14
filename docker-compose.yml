@@ -1,0 +1,16 @@
+services:
+  mqtt-web:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      MQTT_URL: mqtt://broker.hivemq.com:1883
+      MQTT_ROOT_FILTER: "mqtt-web/#"
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      MAX_MESSAGES_PER_TOPIC: 100
+      MESSAGES_PER_PAGE: 100
+      TOPIC_CHILDREN_PER_PAGE: 200
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
