@@ -1,5 +1,8 @@
 # MQTT Web
 
+[![GitHub](https://img.shields.io/badge/GitHub-gustavocaloi%2FMQTT--Web-181717?logo=github)](https://github.com/gustavocaloi/MQTT-Web)
+[![License: MIT](https://img.shields.io/badge/License-MIT-4d2d5e.svg)](https://opensource.org/license/MIT)
+
 Aplicacao web simples para acompanhar mensagens MQTT em tempo real, agrupadas por topico.
 
 ## Como funciona
