@@ -23,6 +23,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const publicDir = path.join(__dirname, '..', 'public');
+const imageDir = path.join(__dirname, '..', 'img');
 
 const state = {
   mqtt: {
@@ -39,6 +40,14 @@ const state = {
 
 app.use(express.static(publicDir, {
   extensions: ['html'],
+  etag: false,
+  maxAge: 0,
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store');
+  },
+}));
+
+app.use('/img', express.static(imageDir, {
   etag: false,
   maxAge: 0,
   setHeaders: (res) => {

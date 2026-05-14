@@ -11,6 +11,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package*.json ./
 COPY src ./src
 COPY public ./public
+COPY img ./img
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:${PORT}/health >/dev/null || exit 1

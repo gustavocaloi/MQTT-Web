@@ -10,6 +10,7 @@ const elements = {
   searchInput: document.querySelector('#searchInput'),
   pauseButton: document.querySelector('#pauseButton'),
   clearButton: document.querySelector('#clearButton'),
+  themeToggle: document.querySelector('#themeToggle'),
 };
 
 const state = {
@@ -64,6 +65,12 @@ elements.clearButton.addEventListener('click', async () => {
   }
 });
 
+elements.themeToggle.addEventListener('click', () => {
+  const nextTheme = getCurrentTheme() === 'dark' ? 'light' : 'dark';
+  applyTheme(nextTheme, true);
+});
+
+initializeTheme();
 connect();
 
 async function connect() {
@@ -134,6 +141,33 @@ function applySnapshot(snapshot) {
   scheduleRender();
 }
 
+function initializeTheme() {
+  const savedTheme = localStorage.getItem('mqtt-web-theme');
+  const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  applyTheme(savedTheme || preferredTheme, Boolean(savedTheme));
+
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
+    if (localStorage.getItem('mqtt-web-theme')) return;
+    applyTheme(event.matches ? 'dark' : 'light', false);
+  });
+}
+
+function applyTheme(theme, persist) {
+  const normalizedTheme = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = normalizedTheme;
+  elements.themeToggle.setAttribute('aria-pressed', String(normalizedTheme === 'dark'));
+  elements.themeToggle.setAttribute('aria-label', normalizedTheme === 'dark' ? 'Usar tema claro' : 'Usar tema escuro');
+  elements.themeToggle.setAttribute('title', normalizedTheme === 'dark' ? 'Tema claro' : 'Tema escuro');
+
+  if (persist) {
+    localStorage.setItem('mqtt-web-theme', normalizedTheme);
+  }
+}
+
+function getCurrentTheme() {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
 function resetLocalMessageState() {
   state.expandedPaths.clear();
   state.openedMessages.clear();
@@ -164,7 +198,7 @@ function resetFlashTimer(path) {
     state.flashingPaths.delete(path);
     state.flashTimers.delete(path);
     scheduleRender();
-  }, 3500);
+  }, 1000);
 
   state.flashTimers.set(path, timer);
 }
