@@ -7,9 +7,11 @@ Aplicacao web simples para acompanhar mensagens MQTT em tempo real, agrupadas po
 
 ## Como funciona
 
+![print](https://raw.githubusercontent.com/gustavocaloi/MQTT-Web/main/img/printscreen.png)
+
 O servidor Node conecta no broker MQTT, assina o filtro raiz configurado e envia as mensagens para a interface via WebSocket. A mesma aplicacao serve a UI e a API, entao o container nao depende de outro componente para subir alem do broker MQTT que voce quer monitorar.
 
-Na interface, os topicos aparecem minimizados em arvore. Quando uma nova mensagem chega, o caminho do topico pulsa visualmente. Ao clicar em cada nivel, a arvore expande a separacao do topico; no ultimo nivel, as mensagens aparecem minimizadas e o payload abre com um novo clique.
+Na interface, os topicos aparecem minimizados em arvore. Quando uma nova mensagem chega, o caminho do topico pulsa visualmente. O clique no ultimo topico abre diretamente o payload, a comparacao com a mensagem anterior e o historico paginado. Topicos com mensagens proprias e subtópicos permitem acessar ambos pelo mesmo clique.
 
 As mensagens de cada topico sao paginadas. O tamanho da pagina e configurado por ambiente e no Compose o padrao esta em 100 mensagens por pagina. Para volumes grandes, os subtopicos tambem sao exibidos em lotes para manter a interface responsiva.
 
@@ -20,7 +22,7 @@ Importante: MQTT nao possui uma consulta universal de historico. A tela mostra m
 | Variavel | Padrao | Descricao |
 | --- | --- | --- |
 | `PORT` | `8080` | Porta HTTP da aplicacao |
-| `MQTT_URL` | `mqtt://localhost:1883` | URL do broker MQTT |
+| `MQTT_URL` | vazio | URL do broker MQTT; sem URL, a tela abre o popup de configuracao |
 | `MQTT_ROOT_FILTER` | `#` | Filtro raiz MQTT usado para assinar e limitar o que pode ser exibido |
 | `MQTT_TOPIC` |  | Alias legado para `MQTT_ROOT_FILTER`, usado apenas se `MQTT_ROOT_FILTER` nao estiver definido |
 | `MQTT_USERNAME` |  | Usuario MQTT, se necessario |
@@ -32,6 +34,27 @@ Importante: MQTT nao possui uma consulta universal de historico. A tela mostra m
 | `MAX_PAYLOAD_PREVIEW` | `65536` | Limite de exibicao do payload por mensagem |
 
 ## Rodar localmente
+
+### Conexao pela interface
+
+O botao de configuracao no cabecalho abre o popup com broker, usuario, senha,
+filtro raiz e QoS. Sem `MQTT_URL`, o popup abre automaticamente ao acessar a
+plataforma. O servidor continua disponivel mesmo sem broker configurado.
+
+As alteracoes valem para todos os navegadores conectados a esta instancia,
+apenas ate o processo/container reiniciar. Nenhum arquivo `.env` e alterado e
+as credenciais nao sao salvas no navegador. A reinicializacao restaura as
+variaveis de ambiente. Aplicar uma conexao limpa o historico em memoria.
+
+A senha atual nao e retornada pela API: o campo vazio a preserva para o mesmo
+broker e usuario. O botao de remover senha a limpa explicitamente. Ao trocar
+broker ou usuario, informe a senha novamente, se necessaria.
+
+Esta aplicacao nao possui autenticacao de acesso. Restrinja a interface/API a
+uma rede confiavel ou a um proxy autenticado; use HTTPS fora do ambiente local.
+Quem acessa a instancia pode alterar a conexao compartilhada.
+
+### Desenvolvimento
 
 ```bash
 npm install
@@ -55,5 +78,5 @@ docker run --rm -p 8080:8080 \
 Ou com Compose:
 
 ```bash
-docker compose up --build
+bash deploy/scripts/deploy-local.sh
 ```

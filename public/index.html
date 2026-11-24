@@ -1,129 +1,61 @@
 <!doctype html>
 <html lang="pt-BR">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MQTT Web</title>
-    <link rel="icon" href="../img/favicon.ico" sizes="any" />
-    <link rel="apple-touch-icon" href="../img/8A8C208C-9815-4E32-B7F8-388442729C6B.png" />
-    <script>
-      (() => {
-        const savedTheme = localStorage.getItem('mqtt-web-theme');
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.dataset.theme = savedTheme || (prefersDark ? 'dark' : 'light');
-      })();
-    </script>
-    <link rel="stylesheet" href="styles.css?v=20260513-10" />
-  </head>
-  <body>
-    <main class="app-shell">
-      <header class="topbar">
-        <div class="brand">
-          <img src="../img/8A8C208C-9815-4E32-B7F8-388442729C6B.png" alt="MQTT Web" />
-          <div>
-            <h1>MQTT Web</h1>
-            <p>Leitura em tempo real por topico</p>
-          </div>
-        </div>
-        <div class="header-actions">
-          <button class="theme-toggle" id="themeToggle" type="button" aria-label="Alternar tema" title="Alternar tema">
-            <svg class="theme-icon theme-icon-sun" aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M12 4V2m0 20v-2m8-8h2M2 12h2m14.95-6.95 1.42-1.42M3.63 20.37l1.42-1.42m0-13.9L3.63 3.63m16.74 16.74-1.42-1.42M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
-            </svg>
-            <svg class="theme-icon theme-icon-moon" aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M20.5 14.8A8.5 8.5 0 0 1 9.2 3.5 8.5 8.5 0 1 0 20.5 14.8Z" />
-            </svg>
-          </button>
-          <a class="github-link" href="https://github.com/gustavocaloi/MQTT-Web" target="_blank" rel="noreferrer" aria-label="Abrir repositorio no GitHub" title="GitHub">
-            <svg aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M12 .5a12 12 0 0 0-3.8 23.38c.6.1.82-.26.82-.58v-2.24c-3.34.73-4.04-1.42-4.04-1.42-.55-1.38-1.34-1.75-1.34-1.75-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.08 1.83 2.82 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.66-.3-5.46-1.33-5.46-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23A11.5 11.5 0 0 1 12 6.28c1.02 0 2.05.14 3.02.41 2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.25 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.8 5.62-5.48 5.92.43.37.82 1.1.82 2.22v3.3c0 .32.21.69.83.57A12 12 0 0 0 12 .5Z" />
-            </svg>
-          </a>
-          <div class="status-card" id="connectionStatus">
-            <span class="status-dot"></span>
-            <div>
-              <strong>Conectando</strong>
-              <small>Aguardando broker</small>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <section class="metrics" aria-label="Resumo">
-        <article>
-          <span id="topicCount">0</span>
-          <p>Topicos</p>
-        </article>
-        <article>
-          <span id="messageCount">0</span>
-          <p>Mensagens</p>
-        </article>
-        <article>
-          <span id="brokerUrl">-</span>
-          <p>Broker</p>
-        </article>
-        <article>
-          <span id="topicFilter">#</span>
-          <p>Filtro</p>
-        </article>
-      </section>
-
-      <section class="toolbar" aria-label="Ferramentas">
-        <label class="search">
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="m21 21-4.3-4.3m1.3-5.2a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0Z" />
-          </svg>
-          <input id="searchInput" type="search" placeholder="Filtrar topicos, ex: flight/#" autocomplete="off" />
-        </label>
-        <button id="pauseButton" type="button" aria-pressed="false">
-          <span class="pause-icon"></span>
-          Pausar
-        </button>
-        <button id="clearButton" class="danger-button" type="button">
-          Limpar
-        </button>
-      </section>
-
-      <section id="topics" class="topics" aria-live="polite">
-        <div class="empty-state">
-          <h2>Nenhuma mensagem recebida ainda</h2>
-          <p>Assim que o broker publicar algo no filtro configurado, os topicos aparecem aqui.</p>
-        </div>
-      </section>
-    </main>
-
-    <template id="topicNodeTemplate">
-      <article class="topic-node">
-        <div class="topic-row">
-          <button class="topic-toggle" type="button">
-            <span class="topic-caret" aria-hidden="true"></span>
-            <div>
-              <h2></h2>
-              <p></p>
-            </div>
-            <span class="topic-count"></span>
-          </button>
-          <button class="topic-filter" type="button" title="Filtrar por este topico" aria-label="Filtrar por este topico">
-            <svg aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z" />
-            </svg>
-          </button>
-        </div>
-        <div class="topic-children"></div>
-      </article>
-    </template>
-
-    <template id="messageTemplate">
-      <article class="message">
-        <button class="message-summary" type="button">
-          <span class="message-time"></span>
-          <span class="badge"></span>
-          <span class="badge retained">retained</span>
-        </button>
-        <pre hidden></pre>
-      </article>
-    </template>
-
-    <script src="app.js?v=20260513-10" type="module"></script>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MQTT Web</title>
+  <link rel="icon" href="/img/favicon.ico" />
+  <script>
+    try { document.documentElement.dataset.theme = localStorage.getItem('mqtt-web-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); } catch {}
+  </script>
+  <link rel="stylesheet" href="/styles.css?v=20261123" />
+  <script src="/vendor/lucide.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="/img/8A8C208C-9815-4E32-B7F8-388442729C6B.png" alt="" /><h1>MQTT Web</h1><span class="divider"></span><span class="subtle">Explorer</span></div>
+    <div class="actions"><span id="connectionStatus" class="status">Conectando</span><button id="connectionButton" class="icon-button" title="Configurar conexao MQTT" aria-label="Configurar conexao MQTT"><i data-lucide="settings-2"></i></button><button id="pauseButton" class="icon-button" title="Pausar atualizacao" aria-label="Pausar atualizacao"><i data-lucide="pause"></i></button><button id="clearButton" class="icon-button" title="Limpar mensagens" aria-label="Limpar mensagens"><i data-lucide="trash-2"></i></button><button id="themeToggle" class="icon-button" title="Alternar tema" aria-label="Alternar tema"><i data-lucide="sun-moon"></i></button><a class="icon-button" href="https://github.com/gustavocaloi/MQTT-Web" target="_blank" rel="noreferrer" title="GitHub" aria-label="GitHub">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M12 .297C5.37.297 0 5.67 0 12.297c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.043-1.61-4.043-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.237 1.838 1.237 1.07 1.835 2.809 1.305 3.495.998.108-.776.419-1.305.762-1.605-2.665-.304-5.466-1.334-5.466-5.931 0-1.31.469-2.381 1.236-3.221-.124-.303-.536-1.524.117-3.176 0 0 1.008-.322 3.301 1.23a11.52 11.52 0 0 1 3.003-.404c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.655 1.652.243 2.873.12 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.805 5.624-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.015 2.898-.015 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.595 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+    </a></div>
+  </header>
+  <div class="connection-strip"><span class="broker" id="brokerUrl">Broker</span><span>Assinatura <code id="topicFilter">#</code></span><span class="counters"><b id="topicCount">0</b> topicos <span class="divider"></span><b id="messageCount">0</b> mensagens</span></div>
+  <p id="error" class="error" role="alert" hidden></p>
+  <main class="workspace">
+    <aside class="navigator" aria-label="Navegacao de topicos">
+      <div class="section-heading"><h2>Topicos</h2><button id="collapseButton" class="icon-button" title="Recolher arvore" aria-label="Recolher arvore"><i data-lucide="fold-vertical"></i></button></div>
+      <div class="search"><i data-lucide="search"></i><input id="searchInput" type="search" placeholder="Filtrar: flight/#" aria-label="Filtro MQTT" spellcheck="false" /><button id="resetFilter" class="icon-button" title="Limpar filtro" aria-label="Limpar filtro"><i data-lucide="x"></i></button></div>
+      <p id="filterError" class="filter-error" hidden>Filtro MQTT invalido</p>
+      <div id="treeViewport" class="tree-viewport" tabindex="0" aria-label="Arvore de topicos"><div id="treeSpacer"><div id="treeRows"></div></div></div>
+      <div class="navigator-footer"><span id="treeCount">0 caminhos</span><span id="activity">Aguardando mensagens</span></div>
+    </aside>
+    <section class="inspector" aria-label="Inspecao de payload">
+      <div id="emptyInspector" class="empty-inspector"><i data-lucide="braces"></i><h2>Nenhum payload selecionado</h2></div>
+      <div id="detail" hidden>
+        <header class="detail-heading"><div><p class="overline">PAYLOAD</p><h2 id="selectedTopic"></h2></div><button id="liveButton" class="live-button" aria-pressed="true"><span class="live-dot"></span>Ao vivo</button></header>
+        <div id="messageMeta" class="message-meta"></div>
+        <div class="view-toolbar"><div class="tabs" role="tablist" aria-label="Visualizacao"><button id="diffTab" role="tab" aria-selected="true">Alteracoes</button><button id="payloadTab" role="tab" aria-selected="false">Payload</button></div><span id="diffStats" class="subtle"></span><button id="copyButton" class="icon-button" title="Copiar payload" aria-label="Copiar payload"><i data-lucide="copy"></i></button></div>
+        <div id="comparisonMeta" class="comparison-meta"></div>
+        <div id="content" class="code-content" role="tabpanel" tabindex="0"></div>
+        <section class="history"><div class="section-heading"><h2>Historico <span id="historyCount" class="subtle"></span></h2><div class="actions"><button id="previousPage" class="icon-button" title="Pagina anterior" aria-label="Pagina anterior"><i data-lucide="chevron-left"></i></button><span id="pageLabel"></span><button id="nextPage" class="icon-button" title="Proxima pagina" aria-label="Proxima pagina"><i data-lucide="chevron-right"></i></button></div></div><div class="history-scroll"><table><thead><tr><th>Recebida em</th><th>Formato</th><th>Tamanho</th><th>QoS</th><th>Retida</th></tr></thead><tbody id="historyRows"></tbody></table></div></section>
+      </div>
+    </section>
+  </main>
+  <dialog id="connectionDialog" class="connection-dialog" aria-labelledby="connectionTitle">
+    <form id="connectionForm">
+      <header class="dialog-heading"><h2 id="connectionTitle">Conexao MQTT</h2><button id="closeConnection" type="button" class="icon-button" title="Fechar" aria-label="Fechar"><i data-lucide="x"></i></button></header>
+      <div class="connection-fields">
+        <label for="connectionUrl">Broker</label>
+        <input id="connectionUrl" name="url" type="text" inputmode="url" placeholder="mqtt://localhost:1883" maxlength="2048" required spellcheck="false" autocomplete="off" autofocus />
+        <label for="connectionUsername">Usuario</label>
+        <input id="connectionUsername" name="username" type="text" maxlength="1024" autocomplete="username" spellcheck="false" />
+        <label for="connectionPassword">Senha</label>
+        <div class="password-field"><input id="connectionPassword" name="password" type="password" maxlength="4096" autocomplete="new-password" /><button id="clearConnectionPassword" type="button" class="icon-button" title="Remover senha" aria-label="Remover senha"><i data-lucide="eraser"></i></button></div>
+        <div class="connection-options"><div><label for="connectionRootFilter">Filtro raiz</label><input id="connectionRootFilter" name="rootFilter" type="text" value="#" required spellcheck="false" autocomplete="off" /></div><div><label for="connectionQos">QoS</label><select id="connectionQos" name="qos"><option value="0">0</option><option value="1">1</option><option value="2">2</option></select></div></div>
+        <p id="connectionError" class="connection-error" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer"><button id="cancelConnection" type="button" class="secondary-button">Cancelar</button><button id="saveConnection" type="submit" class="primary-button"><i data-lucide="plug-zap"></i><span>Aplicar e conectar</span></button></footer>
+    </form>
+  </dialog>
+  <script src="/app.js?v=20261123" type="module"></script>
+</body>
 </html>

@@ -5,16 +5,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Uso:
-  ./scripts/build-and-push-hub.sh <imagem> [tag] [--latest] [--no-cache] [--prune]
+  ./deploy/scripts/build-and-push-hub.sh <imagem> [tag] [--latest] [--no-cache] [--prune]
 
 Exemplos:
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai beta
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai beta --latest
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai --no-cache
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai --prune
-  ./scripts/build-and-push-hub.sh lcaloi/expertiseai --no-cache --prune
-  TAG_PUBLISH=beta ./scripts/build-and-push-hub.sh lcaloi/expertiseai
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web beta
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web beta --latest
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web --no-cache
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web --prune
+  ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web --no-cache --prune
+  TAG_PUBLISH=beta ./deploy/scripts/build-and-push-hub.sh lcaloi/mqtt-web
   Sem tag informada, usa a data atual automaticamente.
 
 Requer:
@@ -82,7 +82,7 @@ if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   exit 1
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if [ ! -f Dockerfile ]; then
