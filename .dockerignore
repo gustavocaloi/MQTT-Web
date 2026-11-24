@@ -6,4 +6,7 @@ dist
 build
 coverage
 .env
+.env.*
+test-results
+tests
 ./script

@@ -24,6 +24,12 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 const publicDir = path.join(__dirname, '..', 'public');
 const imageDir = path.join(__dirname, '..', 'img');
+const pendingTopics = new Map();
+let generation = 0;
+let sequence = 0;
+
+app.get('/vendor/lucide.js', (_req, res) => res.sendFile(path.join(__dirname, '../node_modules/lucide/dist/umd/lucide.js')));
+app.use('/vendor/diff', express.static(path.join(__dirname, '../node_modules/diff/libesm')));
 
 const state = {
   mqtt: {
@@ -61,7 +67,7 @@ app.get('/api/state', (_req, res) => {
 
 app.get('/api/messages', (req, res) => {
   const topic = String(req.query.topic || '');
-  const pageSize = normalizePositiveNumber(req.query.pageSize, MESSAGES_PER_PAGE);
+  const pageSize = Math.min(200, normalizePositiveNumber(req.query.pageSize, MESSAGES_PER_PAGE));
   const page = normalizePositiveNumber(req.query.page, 1);
   const topicState = state.topics.get(topic);
 
@@ -70,7 +76,9 @@ app.get('/api/messages', (req, res) => {
     return;
   }
 
-  const totalMessages = topicState.messages.length;
+  const anchor = Number(req.query.before || Infinity);
+  const available = topicState.messages.filter(message => message.sequence <= anchor);
+  const totalMessages = available.length;
   const totalPages = Math.max(1, Math.ceil(totalMessages / pageSize));
   const currentPage = Math.min(page, totalPages);
   const start = (currentPage - 1) * pageSize;
@@ -81,7 +89,10 @@ app.get('/api/messages', (req, res) => {
     pageSize,
     totalMessages,
     totalPages,
-    messages: topicState.messages.slice(start, start + pageSize),
+    generation,
+    version: topicState.count,
+    messages: available.slice(start, start + pageSize),
+    previous: available[start + pageSize] || null,
   });
 });
 
@@ -163,19 +174,19 @@ client.on('message', (topic, payload, packet) => {
   state.totalMessages += 1;
   state.topics.set(topic, topicState);
 
-  broadcast({
-    type: 'message',
-    data: {
-      message,
-      topic: toTopicSummary(topicState),
-      totalMessages: state.totalMessages,
-      topicCount: state.topics.size,
-    },
-  });
+  pendingTopics.set(topic, toTopicSummary(topicState));
 });
 
+// Coalesce busy topics and bound each WebSocket frame; history stays on the server.
+setInterval(() => {
+  if (!pendingTopics.size) return;
+  const topics = Array.from(pendingTopics.values()).slice(0, 500);
+  for (const topic of topics) pendingTopics.delete(topic.topic);
+  broadcast({ type: 'batch', data: { topics, generation, totalMessages: state.totalMessages, topicCount: state.topics.size } });
+}, 100).unref();
+
 server.listen(PORT, () => {
-  console.log(`mqtt-web listening on port ${PORT}`);
+  console.log(`mqtt-web listening on port ${server.address().port}`);
   console.log(`subscribing to ${MQTT_ROOT_FILTER} on ${sanitizeBrokerUrl(MQTT_URL)}`);
 });
 
@@ -186,6 +197,8 @@ function updateMqttError(error) {
 }
 
 function clearMessages() {
+  generation += 1;
+  pendingTopics.clear();
   state.topics.clear();
   state.totalMessages = 0;
 }
@@ -196,6 +209,7 @@ function normalizeMessage(topic, payload, packet) {
   const text = truncated ? raw.slice(0, MAX_PAYLOAD_PREVIEW) : raw;
 
   return {
+    sequence: ++sequence,
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     topic,
     payload: text,
@@ -226,6 +240,7 @@ function createSnapshot() {
     .sort((a, b) => a.topic.localeCompare(b.topic, 'pt-BR'));
 
   return {
+    generation,
     mqtt: state.mqtt,
     topics,
     topicCount: topics.length,
@@ -252,7 +267,7 @@ function toTopicSummary(topicState) {
 
 function normalizePositiveNumber(value, fallback) {
   const number = Number(value || fallback);
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+  return Number.isSafeInteger(number) && number > 0 ? number : fallback;
 }
 
 function broadcast(payload) {
@@ -260,6 +275,10 @@ function broadcast(payload) {
 
   for (const socket of wss.clients) {
     if (socket.readyState === WebSocket.OPEN) {
+      if (socket.bufferedAmount > 2 * 1024 * 1024) {
+        socket.terminate();
+        continue;
+      }
       socket.send(data);
     }
   }

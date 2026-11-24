@@ -1,680 +1,398 @@
-const elements = {
-  topics: document.querySelector('#topics'),
-  topicNodeTemplate: document.querySelector('#topicNodeTemplate'),
-  messageTemplate: document.querySelector('#messageTemplate'),
-  status: document.querySelector('#connectionStatus'),
-  topicCount: document.querySelector('#topicCount'),
-  messageCount: document.querySelector('#messageCount'),
-  brokerUrl: document.querySelector('#brokerUrl'),
-  topicFilter: document.querySelector('#topicFilter'),
-  searchInput: document.querySelector('#searchInput'),
-  pauseButton: document.querySelector('#pauseButton'),
-  clearButton: document.querySelector('#clearButton'),
-  themeToggle: document.querySelector('#themeToggle'),
-};
+import { validFilter, topicMatches } from './topic-filter.js';
 
+const $ = id => document.getElementById(id);
+const collator = new Intl.Collator('pt-BR', { numeric: true });
+const clock = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+const root = { children: new Map(), key: 'root', count: 0 };
 const state = {
-  topics: new Map(),
-  mqtt: null,
-  topicCount: 0,
-  totalMessages: 0,
-  paused: false,
-  queuedEvents: [],
-  expandedPaths: new Set(),
-  openedMessages: new Set(),
-  flashingPaths: new Set(),
-  flashTimers: new Map(),
-  pageByPath: new Map(),
-  visibleChildrenByPath: new Map(),
-  messagePages: new Map(),
-  loadingPages: new Set(),
-  limits: {
-    messagesPerPage: 100,
-    topicChildrenPerPage: 200,
-  },
-  query: '',
-  renderQueued: false,
-  renderTimer: null,
+  topics: new Map(), expanded: new Set(), flat: [], rows: new Map(), structureDirty: true,
+  query: '', generation: 0, paused: false, socket: null, selected: null, page: 1,
+  pageSize: 100, pageData: null, message: null, previous: null, follow: true,
+  anchor: null, request: null, requestToken: 0, needsPage: false, lastFetch: 0,
+  totalMessages: 0, topicCount: 0, view: 'diff', worker: null, diffToken: 0,
 };
+window.lucide.createIcons();
+const icons = new Map();
+function icon(name) {
+  if (!icons.has(name)) icons.set(name, window.lucide.createElement(window.lucide.icons[name]));
+  return icons.get(name).cloneNode(true);
+}
+function button(name, title, action) {
+  const el = document.createElement('button');
+  el.className = 'icon-button';
+  el.title = title;
+  el.setAttribute('aria-label', title);
+  el.append(icon(name));
+  el.onclick = action;
+  return el;
+}
+function notice(message) {
+  $('error').textContent = message;
+  $('error').hidden = !message;
+}
+function time(value) { return value ? clock.format(new Date(value)) : '-'; }
+function bytes(value) { return value < 1024 ? value + ' B' : (value / 1024).toFixed(1) + ' KB'; }
 
-elements.searchInput.addEventListener('input', (event) => {
-  state.query = event.target.value.trim().toLowerCase();
-  scheduleRender();
-});
-
-elements.pauseButton.addEventListener('click', () => {
-  state.paused = !state.paused;
-  elements.pauseButton.setAttribute('aria-pressed', String(state.paused));
-  elements.pauseButton.textContent = state.paused ? 'Retomar' : 'Pausar';
-
-  if (!state.paused) {
-    const events = state.queuedEvents.splice(0);
-    events.forEach(applyEvent);
-    scheduleRender();
+function upsert(topic, flash) {
+  const old = state.topics.get(topic.topic);
+  if (old && old.count >= topic.count) return;
+  state.topics.set(topic.topic, topic);
+  const parts = topic.topic.split('/');
+  let node = root;
+  for (let depth = 0; depth < parts.length; depth++) {
+    const part = parts[depth];
+    if (!node.children.has(part)) {
+      node.children.set(part, { children: new Map(), key: JSON.stringify(parts.slice(0, depth + 1)), path: parts.slice(0, depth + 1).join('/'), label: part || '(vazio)', count: 0, flashUntil: 0 });
+      state.structureDirty = true;
+    }
+    node = node.children.get(part);
+    node.count += topic.count - (old?.count || 0);
+    if (flash) node.flashUntil = performance.now() + 1000;
   }
+  node.topic = topic.topic;
+  if (state.selected === topic.topic && state.follow) state.needsPage = true;
+}
+
+function snapshot(data) {
+  const cleared = data.generation !== state.generation;
+  root.children.clear();
+  $('treeRows').replaceChildren();
+  state.rows.clear();
+  state.topics.clear();
+  state.generation = data.generation;
+  state.pageSize = Math.min(200, data.limits.messagesPerPage || 100);
+  state.totalMessages = data.totalMessages;
+  state.topicCount = data.topicCount;
+  for (const topic of data.topics) upsert(topic, false);
+  state.structureDirty = true;
+  if (cleared || (state.selected !== null && !state.topics.has(state.selected))) resetDetail();
+  else if (state.selected !== null && state.follow) state.needsPage = true;
+  showStatus(data.mqtt);
+  $('brokerUrl').textContent = data.mqtt.url;
+  $('brokerUrl').title = data.mqtt.url;
+  $('topicFilter').textContent = data.mqtt.topic;
+  tick();
+}
+function showStatus(mqtt) {
+  const online = !!mqtt?.connected && !state.paused;
+  $('connectionStatus').textContent = state.paused ? 'Pausado' : online ? 'Conectado' : 'Desconectado';
+  $('connectionStatus').classList.toggle('online', online);
+  $('connectionStatus').title = mqtt?.lastError || '';
+}
+function connect() {
+  if (state.paused) return;
+  const socket = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  state.socket = socket;
+  socket.onmessage = event => {
+    if (state.paused || state.socket !== socket) return;
+    const { type, data } = JSON.parse(event.data);
+    if (type === 'snapshot' || type === 'cleared') snapshot(data);
+    if (type === 'status') showStatus(data);
+    if (type === 'batch' && data.generation === state.generation) {
+      for (const topic of data.topics) upsert(topic, true);
+      state.totalMessages = data.totalMessages;
+      state.topicCount = data.topicCount;
+    }
+  };
+  socket.onclose = () => {
+    if (state.socket !== socket) return;
+    showStatus(null);
+    if (!state.paused) setTimeout(connect, 1500);
+  };
+}
+
+function flatten() {
+  const visible = state.query ? new Set() : null;
+  if (visible && validFilter(state.query)) {
+    for (const topic of state.topics.keys()) {
+      if (!topicMatches(state.query, topic)) continue;
+      const parts = topic.split('/');
+      for (let i = 1; i <= parts.length; i++) visible.add(JSON.stringify(parts.slice(0, i)));
+    }
+  }
+  const rows = [];
+  function visit(parent, depth) {
+    const nodes = [...parent.children.values()].sort((a, b) => collator.compare(a.label, b.label) || a.path.localeCompare(b.path));
+    for (const node of nodes) {
+      if (visible && !visible.has(node.key)) continue;
+      rows.push({ key: node.key, node, depth, kind: 'branch' });
+      if (!state.expanded.has(node.key)) continue;
+      if (node.topic !== undefined && (!state.query || topicMatches(state.query, node.topic))) {
+        rows.push({ key: 'payload:' + node.key, node, depth: depth + 1, kind: 'payload' });
+      }
+      visit(node, depth + 1);
+    }
+  }
+  visit(root, 0);
+  state.flat = rows;
+  state.structureDirty = false;
+  $('treeSpacer').style.height = rows.length * 36 + 'px';
+  $('treeCount').textContent = rows.length + ' caminhos';
+}
+
+function renderTree() {
+  const viewport = $('treeViewport');
+  const start = Math.max(0, Math.floor(viewport.scrollTop / 36) - 5);
+  const end = Math.min(state.flat.length, start + Math.ceil(viewport.clientHeight / 36) + 12);
+  const needed = new Set();
+  for (let i = start; i < end; i++) {
+    const item = state.flat[i];
+    needed.add(item.key);
+    let row = state.rows.get(item.key);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'tree-row';
+      row.dataset.key = item.key;
+      const toggle = document.createElement('button');
+      toggle.className = 'tree-toggle';
+      const label = document.createElement('span');
+      label.className = 'tree-label';
+      const count = document.createElement('span');
+      count.className = 'tree-count';
+      toggle.append(icon(item.kind === 'payload' ? 'Braces' : 'ChevronRight'), label);
+      row.append(toggle, count, button('Filter', 'Filtrar ' + item.node.path, () => setFilter(item.node.path + '/#')));
+      row.lastChild.classList.add('filter-button');
+      toggle.onclick = () => {
+        if (item.kind === 'payload') selectTopic(item.node.topic);
+        else {
+          state.expanded.has(item.node.key) ? state.expanded.delete(item.node.key) : state.expanded.add(item.node.key);
+          state.structureDirty = true;
+          tick();
+        }
+      };
+      state.rows.set(item.key, row);
+      $('treeRows').append(row);
+    }
+    row.style.position = 'absolute';
+    row.style.top = i * 36 + 'px';
+    row.style.width = '100%';
+    row.style.paddingLeft = (12 + Math.min(item.depth, 10) * 14) + 'px';
+    row.querySelector('.tree-label').textContent = item.kind === 'payload' ? 'Payload' : item.node.label;
+    row.querySelector('.tree-count').textContent = item.kind === 'payload' ? '' : item.node.count.toLocaleString('pt-BR');
+    row.querySelector('.tree-toggle').title = item.node.path;
+    const toggle = row.querySelector('.tree-toggle');
+    if (item.kind === 'branch') {
+      toggle.setAttribute('aria-expanded', String(state.expanded.has(item.node.key)));
+      toggle.querySelector('svg').style.transform = state.expanded.has(item.node.key) ? 'rotate(90deg)' : '';
+    } else toggle.setAttribute('aria-pressed', String(state.selected === item.node.topic));
+    row.classList.toggle('selected', item.kind === 'payload' && state.selected === item.node.topic);
+    row.classList.toggle('active', item.node.flashUntil > performance.now());
+  }
+  for (const [key, row] of state.rows) if (!needed.has(key)) { row.remove(); state.rows.delete(key); }
+}
+function setFilter(value) {
+  state.query = value;
+  $('searchInput').value = value;
+  $('filterError').hidden = !value || validFilter(value);
+  state.structureDirty = true;
+  $('treeViewport').scrollTop = 0;
+  tick();
+}
+
+function resetDetail() {
+  state.request?.abort();
+  state.request = null;
+  state.requestToken++;
+  state.diffToken++;
+  state.selected = null;
+  state.message = null;
+  state.previous = null;
+  state.pageData = null;
+  state.needsPage = false;
+  $('detail').hidden = true;
+  $('emptyInspector').hidden = false;
+  $('historyRows').replaceChildren();
+  $('content').replaceChildren();
+}
+function selectTopic(topic) {
+  resetDetail();
+  state.selected = topic;
+  state.follow = true;
+  state.anchor = null;
+  state.page = 1;
+  $('selectedTopic').textContent = topic;
+  $('detail').hidden = false;
+  $('emptyInspector').hidden = true;
+  $('messageMeta').textContent = 'Carregando...';
+  $('liveButton').setAttribute('aria-pressed', 'true');
+  state.needsPage = true;
+  state.lastFetch = 0;
+  tick();
+}
+async function loadPage() {
+  if (state.request || state.selected === null || state.paused) return;
+  const controller = new AbortController();
+  state.request = controller;
+  const token = ++state.requestToken;
+  const generation = state.generation;
+  state.needsPage = false;
+  state.lastFetch = performance.now();
+  const params = new URLSearchParams({ topic: state.selected, page: state.page, pageSize: state.pageSize });
+  if (state.anchor !== null) params.set('before', state.anchor);
+  try {
+    const response = await fetch('/api/messages?' + params, { signal: controller.signal });
+    if (!response.ok) throw new Error('Nao foi possivel carregar o historico.');
+    const data = await response.json();
+    if (token !== state.requestToken || generation !== state.generation || data.generation !== generation) return;
+    state.pageData = data;
+    state.page = data.page;
+    if (state.follow || !state.message) chooseMessage(0, false);
+    renderHistory();
+    notice('');
+  } catch (error) {
+    if (error.name !== 'AbortError' && token === state.requestToken) {
+      notice(error.message);
+      state.needsPage = true;
+      state.lastFetch = performance.now() + 1500;
+    }
+  } finally {
+    if (state.request === controller) state.request = null;
+  }
+}
+function chooseMessage(index, freeze = true) {
+  if (freeze) {
+    state.follow = false;
+    state.anchor ??= state.pageData?.messages[0]?.sequence ?? null;
+    state.needsPage = false;
+    state.request?.abort();
+    state.request = null;
+    state.requestToken++;
+  }
+  const message = state.pageData?.messages[index] || null;
+  const previous = state.pageData?.messages[index + 1] || state.pageData?.previous || null;
+  const changed = state.message?.id !== message?.id || state.previous?.id !== previous?.id;
+  state.message = message;
+  state.previous = previous;
+  $('liveButton').setAttribute('aria-pressed', String(state.follow));
+  if (changed) renderMessage();
+  renderHistory();
+}
+function renderHistory() {
+  const data = state.pageData;
+  if (!data) return;
+  const signature = data.messages.map(m => m.id).join(',') + state.message?.id;
+  if ($('historyRows').dataset.signature !== signature) {
+    $('historyRows').dataset.signature = signature;
+    $('historyRows').replaceChildren(...data.messages.map((message, index) => {
+      const row = document.createElement('tr');
+      row.classList.toggle('selected', state.message?.id === message.id);
+      const cell = document.createElement('td');
+      const select = document.createElement('button');
+      select.textContent = time(message.receivedAt);
+      select.title = 'Selecionar mensagem ' + message.receivedAt;
+      select.onclick = () => chooseMessage(index);
+      cell.append(select);
+      row.append(cell);
+      for (const value of [message.payloadFormat.toUpperCase(), bytes(message.payloadSize), message.qos, message.retained ? 'Sim' : '-']) {
+        const td = document.createElement('td'); td.textContent = value; row.append(td);
+      }
+      return row;
+    }));
+  }
+  $('historyCount').textContent = '(' + data.totalMessages + ')';
+  $('pageLabel').textContent = data.page + ' / ' + data.totalPages;
+  $('previousPage').disabled = data.page <= 1;
+  $('nextPage').disabled = data.page >= data.totalPages;
+}
+function changePage(delta) {
+  state.follow = false;
+  state.anchor ??= state.pageData?.messages[0]?.sequence ?? null;
+  state.page += delta;
+  state.message = null;
+  state.request?.abort(); state.request = null; state.requestToken++;
+  state.needsPage = true;
+  state.lastFetch = 0;
+  $('liveButton').setAttribute('aria-pressed', 'false');
+  tick();
+}
+function renderMessage() {
+  const message = state.message;
+  if (!message) { $('content').textContent = 'Nenhuma mensagem armazenada'; return; }
+  $('messageMeta').textContent = time(message.receivedAt) + '  ·  ' + message.payloadFormat.toUpperCase() + '  ·  ' + bytes(message.payloadSize) + '  ·  QoS ' + message.qos + (message.retained ? '  ·  Retida' : '') + (message.truncated ? '  ·  Payload truncado' : '');
+  $('comparisonMeta').textContent = state.view === 'payload' ? 'Mensagem selecionada' : state.previous ? time(state.previous.receivedAt) + '  →  ' + time(message.receivedAt) : 'Sem mensagem anterior armazenada';
+  $('diffTab').setAttribute('aria-selected', String(state.view === 'diff'));
+  $('payloadTab').setAttribute('aria-selected', String(state.view === 'payload'));
+  $('diffStats').textContent = '';
+  $('content').setAttribute('aria-busy', 'true');
+  state.worker.postMessage({ token: ++state.diffToken, view: state.view, message, previous: state.previous });
+}
+function startWorker() {
+  state.worker = new Worker('/diff-worker.js', { type: 'module' });
+  state.worker.onmessage = ({ data }) => {
+    if (data.token !== state.diffToken) return;
+    $('content').removeAttribute('aria-busy');
+    $('diffStats').textContent = data.stats;
+    const nodes = data.lines.map(line => {
+      const row = document.createElement('div'); row.className = 'code-line ' + line.kind;
+      for (const [className, value] of [['line-number', line.old || ''], ['line-number', line.current || ''], ['line-sign', line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' '], ['line-text', line.text]]) {
+        const span = document.createElement('span'); span.className = className; span.textContent = value; row.append(span);
+      }
+      return row;
+    });
+    if (data.note) { const p = document.createElement('p'); p.className = 'code-notice'; p.textContent = data.note; nodes.push(p); }
+    $('content').replaceChildren(...nodes);
+  };
+  state.worker.onerror = () => { $('content').removeAttribute('aria-busy'); notice('Falha ao calcular comparacao. Recarregue a pagina.'); };
+}
+function tick() {
+  if (state.structureDirty) flatten();
+  renderTree();
+  $('topicCount').textContent = state.topicCount.toLocaleString('pt-BR');
+  $('messageCount').textContent = state.totalMessages.toLocaleString('pt-BR');
+  $('activity').textContent = state.paused ? 'Pausado' : state.totalMessages ? 'Recepcao ativa' : 'Aguardando mensagens';
+  if (state.needsPage && performance.now() - state.lastFetch >= 350) loadPage();
+}
+function theme() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  $('themeToggle').setAttribute('aria-pressed', String(dark));
+}
+$('themeToggle').onclick = () => {
+  const value = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = value;
+  try { localStorage.setItem('mqtt-web-theme', value); } catch {}
+  theme();
+};
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+  try { if (localStorage.getItem('mqtt-web-theme')) return; } catch {}
+  document.documentElement.dataset.theme = event.matches ? 'dark' : 'light'; theme();
 });
-
-elements.clearButton.addEventListener('click', async () => {
-  elements.clearButton.disabled = true;
-
+$('searchInput').oninput = event => setFilter(event.target.value);
+$('resetFilter').onclick = () => setFilter('');
+$('collapseButton').onclick = () => { state.expanded.clear(); state.structureDirty = true; tick(); };
+$('treeViewport').onscroll = renderTree;
+new ResizeObserver(renderTree).observe($('treeViewport'));
+$('previousPage').onclick = () => changePage(-1);
+$('nextPage').onclick = () => changePage(1);
+$('diffTab').onclick = () => { state.view = 'diff'; renderMessage(); };
+$('payloadTab').onclick = () => { state.view = 'payload'; renderMessage(); };
+$('liveButton').onclick = () => {
+  if (state.follow) { state.follow = false; state.anchor = state.pageData?.messages[0]?.sequence ?? null; state.needsPage = false; state.request?.abort(); state.request = null; state.requestToken++; }
+  else { state.follow = true; state.anchor = null; state.page = 1; state.needsPage = true; state.lastFetch = 0; }
+  $('liveButton').setAttribute('aria-pressed', String(state.follow)); tick();
+};
+$('pauseButton').onclick = () => {
+  state.paused = !state.paused;
+  $('pauseButton').replaceChildren(icon(state.paused ? 'Play' : 'Pause'));
+  $('pauseButton').setAttribute('aria-pressed', String(state.paused));
+  $('pauseButton').title = state.paused ? 'Retomar atualizacao' : 'Pausar atualizacao';
+  $('pauseButton').setAttribute('aria-label', $('pauseButton').title);
+  if (state.paused) { state.socket?.close(); state.request?.abort(); state.request = null; state.requestToken++; showStatus(null); }
+  else connect();
+};
+$('clearButton').onclick = async () => {
+  $('clearButton').disabled = true;
   try {
     const response = await fetch('/api/clear', { method: 'POST' });
     if (!response.ok) throw new Error('Falha ao limpar mensagens');
-  } finally {
-    elements.clearButton.disabled = false;
-  }
-});
-
-elements.themeToggle.addEventListener('click', () => {
-  const nextTheme = getCurrentTheme() === 'dark' ? 'light' : 'dark';
-  applyTheme(nextTheme, true);
-});
-
-initializeTheme();
+    if (state.paused) { const res = await fetch('/api/state'); snapshot(await res.json()); }
+  } catch (error) { notice(error.message); }
+  finally { $('clearButton').disabled = false; }
+};
+$('copyButton').onclick = async () => {
+  try { if (state.message) await navigator.clipboard.writeText(state.message.payload); $('copyButton').title = 'Copiado'; }
+  catch { notice('Nao foi possivel copiar o payload.'); }
+};
+startWorker();
+theme();
 connect();
-
-async function connect() {
-  try {
-    const response = await fetch('/api/state');
-    applySnapshot(await response.json());
-  } catch {
-    setStatus({ connected: false, reconnecting: true, lastError: 'API indisponivel' });
-  }
-
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-  socket.addEventListener('message', (event) => {
-    const payload = JSON.parse(event.data);
-
-    if (state.paused && payload.type === 'message') {
-      state.queuedEvents.push(payload);
-      return;
-    }
-
-    applyEvent(payload);
-    scheduleRender();
-  });
-
-  socket.addEventListener('close', () => {
-    setStatus({ connected: false, reconnecting: true, lastError: 'Reconectando interface' });
-    setTimeout(connect, 1500);
-  });
-}
-
-function applyEvent(payload) {
-  if (payload.type === 'snapshot') {
-    applySnapshot(payload.data);
-    return;
-  }
-
-  if (payload.type === 'status') {
-    state.mqtt = payload.data;
-    return;
-  }
-
-  if (payload.type === 'cleared') {
-    applySnapshot(payload.data);
-    return;
-  }
-
-  if (payload.type === 'message') {
-    const topicName = payload.data.topic.topic;
-    state.topics.set(topicName, payload.data.topic);
-    state.totalMessages = payload.data.totalMessages;
-    state.topicCount = payload.data.topicCount;
-    flashTopic(topicName);
-    applyLiveMessage(topicName, payload.data.message);
-  }
-}
-
-function applySnapshot(snapshot) {
-  state.topics = new Map(snapshot.topics.map((topic) => [topic.topic, topic]));
-  state.mqtt = snapshot.mqtt;
-  state.topicCount = snapshot.topicCount;
-  state.totalMessages = snapshot.totalMessages;
-  resetLocalMessageState();
-  state.limits = {
-    ...state.limits,
-    ...snapshot.limits,
-  };
-  scheduleRender();
-}
-
-function initializeTheme() {
-  const savedTheme = localStorage.getItem('mqtt-web-theme');
-  const preferredTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  applyTheme(savedTheme || preferredTheme, Boolean(savedTheme));
-
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
-    if (localStorage.getItem('mqtt-web-theme')) return;
-    applyTheme(event.matches ? 'dark' : 'light', false);
-  });
-}
-
-function applyTheme(theme, persist) {
-  const normalizedTheme = theme === 'dark' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = normalizedTheme;
-  elements.themeToggle.setAttribute('aria-pressed', String(normalizedTheme === 'dark'));
-  elements.themeToggle.setAttribute('aria-label', normalizedTheme === 'dark' ? 'Usar tema claro' : 'Usar tema escuro');
-  elements.themeToggle.setAttribute('title', normalizedTheme === 'dark' ? 'Tema claro' : 'Tema escuro');
-
-  if (persist) {
-    localStorage.setItem('mqtt-web-theme', normalizedTheme);
-  }
-}
-
-function getCurrentTheme() {
-  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
-}
-
-function resetLocalMessageState() {
-  state.expandedPaths.clear();
-  state.openedMessages.clear();
-  clearTopicFlashes();
-  state.pageByPath.clear();
-  state.visibleChildrenByPath.clear();
-  state.messagePages.clear();
-  state.loadingPages.clear();
-  state.queuedEvents = [];
-}
-
-function flashTopic(topicName) {
-  getTopicSegments(topicName).reduce((prefix, segment) => {
-    const path = prefix ? `${prefix}/${segment}` : segment;
-    state.flashingPaths.add(path);
-    resetFlashTimer(path);
-    return path;
-  }, '');
-}
-
-function resetFlashTimer(path) {
-  const currentTimer = state.flashTimers.get(path);
-  if (currentTimer) {
-    window.clearTimeout(currentTimer);
-  }
-
-  const timer = window.setTimeout(() => {
-    state.flashingPaths.delete(path);
-    state.flashTimers.delete(path);
-    scheduleRender();
-  }, 1000);
-
-  state.flashTimers.set(path, timer);
-}
-
-function clearTopicFlashes() {
-  for (const timer of state.flashTimers.values()) {
-    window.clearTimeout(timer);
-  }
-
-  state.flashingPaths.clear();
-  state.flashTimers.clear();
-}
-
-function renderAll() {
-  state.renderQueued = false;
-  state.renderTimer = null;
-  setStatus(state.mqtt);
-  elements.topicCount.textContent = state.topicCount;
-  elements.messageCount.textContent = state.totalMessages;
-  elements.brokerUrl.textContent = state.mqtt?.url || '-';
-  elements.topicFilter.textContent = state.mqtt?.topic || '#';
-  renderTopics();
-}
-
-function scheduleRender() {
-  if (state.renderQueued) return;
-  state.renderQueued = true;
-  state.renderTimer = window.setTimeout(() => {
-    window.requestAnimationFrame(renderAll);
-  }, 100);
-}
-
-function setStatus(mqtt) {
-  const connected = Boolean(mqtt?.connected);
-  elements.status.classList.toggle('connected', connected);
-  elements.status.classList.toggle('error', Boolean(mqtt?.lastError));
-  elements.status.querySelector('strong').textContent = connected ? 'Online' : 'Offline';
-  elements.status.querySelector('small').textContent = connected
-    ? 'Recebendo em tempo real'
-    : mqtt?.lastError || 'Reconectando';
-}
-
-function renderTopics() {
-  const topics = Array.from(state.topics.values()).filter(matchesQuery);
-
-  if (!topics.length) {
-    elements.topics.innerHTML = `
-      <div class="empty-state">
-        <h2>${state.query ? 'Nada encontrado' : 'Nenhuma mensagem recebida ainda'}</h2>
-        <p>${state.query ? 'Ajuste o filtro para ver outros topicos.' : 'Assim que o broker publicar algo no filtro configurado, os topicos aparecem aqui.'}</p>
-      </div>
-    `;
-    return;
-  }
-
-  const tree = buildTopicTree(topics);
-  const nodes = Array.from(tree.children.values())
-    .sort(sortTreeNodes)
-    .map((node) => renderTopicNode(node, 0));
-
-  elements.topics.replaceChildren(...nodes);
-}
-
-function buildTopicTree(topics) {
-  const root = createTreeNode('', '', null);
-
-  for (const topic of topics) {
-    const segments = getTopicSegments(topic.topic);
-    let current = root;
-    let path = '';
-
-    for (const segment of segments) {
-      path = path ? `${path}/${segment}` : segment;
-
-      if (!current.children.has(segment)) {
-        current.children.set(segment, createTreeNode(segment, path, current));
-      }
-
-      current = current.children.get(segment);
-      current.count += topic.count;
-      current.retainedCount += topic.retainedCount;
-      current.lastMessageAt = latestDate(current.lastMessageAt, topic.lastMessageAt);
-    }
-
-    current.topic = topic;
-  }
-
-  return root;
-}
-
-function createTreeNode(label, path, parent) {
-  return {
-    label,
-    path,
-    parent,
-    topic: null,
-    children: new Map(),
-    count: 0,
-    retainedCount: 0,
-    lastMessageAt: null,
-  };
-}
-
-function renderTopicNode(topicNode, depth) {
-  const node = elements.topicNodeTemplate.content.firstElementChild.cloneNode(true);
-  const row = node.querySelector('.topic-row');
-  const toggle = node.querySelector('.topic-toggle');
-  const filter = node.querySelector('.topic-filter');
-  const title = node.querySelector('h2');
-  const meta = node.querySelector('p');
-  const count = node.querySelector('.topic-count');
-  const children = node.querySelector('.topic-children');
-  const hasChildren = topicNode.children.size > 0;
-  const hasMessages = Boolean(topicNode.topic);
-  const isExpanded = state.expandedPaths.has(topicNode.path);
-
-  node.style.setProperty('--depth', depth);
-  node.classList.toggle('expanded', isExpanded);
-  node.classList.toggle('leaf', !hasChildren);
-  node.classList.toggle('has-new', state.flashingPaths.has(topicNode.path));
-  title.textContent = topicNode.label;
-  meta.textContent = createTopicMeta(topicNode, hasChildren, hasMessages);
-  count.textContent = topicNode.count;
-  toggle.setAttribute('aria-expanded', String(isExpanded));
-
-  toggle.addEventListener('click', () => {
-    toggleTopic(topicNode.path);
-  });
-
-  filter.addEventListener('click', () => {
-    applyTopicFilter(topicNode.path, hasChildren);
-  });
-
-  if (isExpanded) {
-    const childrenValues = Array.from(topicNode.children.values()).sort(sortTreeNodes);
-    const visibleChildren = getVisibleChildrenCount(topicNode.path);
-    const childNodes = childrenValues
-      .slice(0, visibleChildren)
-      .map((child) => renderTopicNode(child, depth + 1));
-
-    children.replaceChildren(...childNodes);
-
-    if (childrenValues.length > visibleChildren) {
-      children.append(renderMoreTopicsButton(topicNode.path, visibleChildren, childrenValues.length));
-    }
-
-    if (hasMessages) {
-      const messages = document.createElement('div');
-      messages.className = 'message-list';
-      messages.replaceChildren(...renderPaginatedMessages(topicNode));
-      children.append(messages);
-    }
-  }
-
-  return node;
-}
-
-function applyTopicFilter(path, includeChildren) {
-  const filterValue = includeChildren ? `${path}/#` : path;
-  state.query = filterValue.toLowerCase();
-  elements.searchInput.value = filterValue;
-  state.expandedPaths.clear();
-  state.visibleChildrenByPath.clear();
-  expandPath(path);
-  scheduleRender();
-}
-
-function expandPath(path) {
-  getTopicSegments(path).reduce((prefix, segment) => {
-    const nextPath = prefix ? `${prefix}/${segment}` : segment;
-    state.expandedPaths.add(nextPath);
-    return nextPath;
-  }, '');
-}
-
-function toggleTopic(path) {
-  if (state.expandedPaths.has(path)) {
-    state.expandedPaths.delete(path);
-  } else {
-    state.expandedPaths.add(path);
-  }
-
-  renderTopics();
-}
-
-function renderPaginatedMessages(topicNode) {
-  const pageSize = getMessagesPerPage();
-  const totalMessages = topicNode.topic.storedMessages ?? topicNode.topic.count;
-  const totalPages = Math.max(1, Math.ceil(totalMessages / pageSize));
-  const currentPage = clampPage(state.pageByPath.get(topicNode.path) || 1, totalPages);
-  const pageKey = createPageKey(topicNode.path, currentPage);
-  const cachedPage = state.messagePages.get(pageKey);
-
-  state.pageByPath.set(topicNode.path, currentPage);
-  ensureMessagePage(topicNode.path, currentPage, pageSize);
-
-  if (!cachedPage) {
-    return [renderLoadingMessages()];
-  }
-
-  const pageMessages = cachedPage.messages.map(renderMessage);
-
-  if (cachedPage.totalPages <= 1) {
-    return pageMessages;
-  }
-
-  return [
-    renderPagination(topicNode.path, cachedPage.page, cachedPage.totalPages, cachedPage.totalMessages, cachedPage.pageSize),
-    ...pageMessages,
-    renderPagination(topicNode.path, cachedPage.page, cachedPage.totalPages, cachedPage.totalMessages, cachedPage.pageSize),
-  ];
-}
-
-function renderLoadingMessages() {
-  const loading = document.createElement('div');
-  loading.className = 'message-loading';
-  loading.textContent = 'Carregando mensagens...';
-  return loading;
-}
-
-function renderMoreTopicsButton(path, visibleChildren, totalChildren) {
-  const wrapper = document.createElement('div');
-  const button = document.createElement('button');
-  const nextVisibleCount = Math.min(visibleChildren + getTopicChildrenPerPage(), totalChildren);
-
-  wrapper.className = 'topic-more';
-  button.type = 'button';
-  button.textContent = `Mostrar mais topicos (${nextVisibleCount} de ${totalChildren})`;
-  button.addEventListener('click', () => {
-    state.visibleChildrenByPath.set(path, nextVisibleCount);
-    renderTopics();
-  });
-  wrapper.append(button);
-  return wrapper;
-}
-
-function renderPagination(path, currentPage, totalPages, totalMessages, pageSize) {
-  const nav = document.createElement('nav');
-  const previous = document.createElement('button');
-  const next = document.createElement('button');
-  const summary = document.createElement('span');
-
-  nav.className = 'pagination';
-  nav.setAttribute('aria-label', 'Paginacao de mensagens');
-  previous.type = 'button';
-  next.type = 'button';
-  previous.textContent = 'Anterior';
-  next.textContent = 'Proxima';
-  previous.disabled = currentPage <= 1;
-  next.disabled = currentPage >= totalPages;
-  summary.textContent = `Pagina ${currentPage} de ${totalPages} - ${totalMessages} mensagens - ${pageSize} por pagina`;
-
-  previous.addEventListener('click', () => {
-    state.pageByPath.set(path, clampPage(currentPage - 1, totalPages));
-    renderTopics();
-  });
-
-  next.addEventListener('click', () => {
-    state.pageByPath.set(path, clampPage(currentPage + 1, totalPages));
-    renderTopics();
-  });
-
-  nav.replaceChildren(previous, summary, next);
-  return nav;
-}
-
-function renderMessage(message) {
-  const node = elements.messageTemplate.content.firstElementChild.cloneNode(true);
-  const summary = node.querySelector('.message-summary');
-  const retained = node.querySelector('.retained');
-  const badge = node.querySelector('.badge:not(.retained)');
-  const pre = node.querySelector('pre');
-  const isOpen = state.openedMessages.has(message.id);
-
-  node.classList.toggle('open', isOpen);
-  summary.setAttribute('aria-expanded', String(isOpen));
-  node.querySelector('.message-time').textContent = formatDate(message.receivedAt);
-  badge.textContent = `${message.payloadFormat} / qos ${message.qos} / ${formatBytes(message.payloadSize)}`;
-  retained.hidden = !message.retained;
-  pre.hidden = !isOpen;
-  pre.textContent = formatPayload(message);
-
-  summary.addEventListener('click', () => {
-    if (state.openedMessages.has(message.id)) {
-      state.openedMessages.delete(message.id);
-    } else {
-      state.openedMessages.add(message.id);
-    }
-    renderTopics();
-  });
-
-  return node;
-}
-
-function matchesQuery(topic) {
-  if (!state.query) return true;
-
-  return mqttTopicMatches(state.query, topic.topic);
-}
-
-function mqttTopicMatches(filter, topic) {
-  const normalizedFilter = String(filter || '').trim();
-  const normalizedTopic = String(topic || '');
-
-  if (!isValidMqttFilter(normalizedFilter)) {
-    return false;
-  }
-
-  if (
-    normalizedTopic.startsWith('$')
-    && !normalizedFilter.startsWith('$')
-  ) {
-    return false;
-  }
-
-  const filterSegments = normalizedFilter.toLowerCase().split('/');
-  const topicSegments = normalizedTopic.toLowerCase().split('/');
-
-  for (let index = 0; index < filterSegments.length; index += 1) {
-    const filterSegment = filterSegments[index];
-    const topicSegment = topicSegments[index];
-
-    if (filterSegment === '#') {
-      return index === filterSegments.length - 1;
-    }
-
-    if (topicSegment === undefined) {
-      return false;
-    }
-
-    if (filterSegment !== '+' && filterSegment !== topicSegment) {
-      return false;
-    }
-  }
-
-  return filterSegments.length === topicSegments.length;
-}
-
-function isValidMqttFilter(filter) {
-  if (!filter) return false;
-
-  const segments = filter.split('/');
-
-  return segments.every((segment, index) => {
-    if (segment.includes('#')) {
-      return segment === '#' && index === segments.length - 1;
-    }
-
-    if (segment.includes('+')) {
-      return segment === '+';
-    }
-
-    return true;
-  });
-}
-
-function getTopicSegments(topicName) {
-  const segments = String(topicName || '').split('/').filter(Boolean);
-  return segments.length ? segments : ['(sem topico)'];
-}
-
-function createTopicMeta(topicNode, hasChildren, hasMessages) {
-  const parts = [];
-  parts.push(`${hasChildren ? topicNode.children.size : 0} subtopicos`);
-  if (hasMessages) parts.push(`${topicNode.topic.storedMessages ?? topicNode.topic.count} mensagens armazenadas`);
-  parts.push(`${topicNode.retainedCount} retidas`);
-  parts.push(formatDate(topicNode.lastMessageAt));
-  return parts.join(' - ');
-}
-
-async function ensureMessagePage(topic, page, pageSize) {
-  const pageKey = createPageKey(topic, page);
-  if (state.messagePages.has(pageKey) || state.loadingPages.has(pageKey)) return;
-
-  state.loadingPages.add(pageKey);
-
-  try {
-    const params = new URLSearchParams({
-      topic,
-      page: String(page),
-      pageSize: String(pageSize),
-    });
-    const response = await fetch(`/api/messages?${params.toString()}`);
-    if (!response.ok) throw new Error('Nao foi possivel carregar mensagens');
-
-    state.messagePages.set(pageKey, await response.json());
-  } catch {
-    state.messagePages.set(pageKey, {
-      topic,
-      page,
-      pageSize,
-      totalMessages: 0,
-      totalPages: 1,
-      messages: [],
-    });
-  } finally {
-    state.loadingPages.delete(pageKey);
-    scheduleRender();
-  }
-}
-
-function applyLiveMessage(topic, message) {
-  const pageSize = getMessagesPerPage();
-  const firstPageKey = createPageKey(topic, 1);
-  const cachedPage = state.messagePages.get(firstPageKey);
-
-  if (!cachedPage) return;
-
-  const totalMessages = cachedPage.totalMessages + 1;
-  state.messagePages.set(firstPageKey, {
-    ...cachedPage,
-    totalMessages,
-    totalPages: Math.max(1, Math.ceil(totalMessages / pageSize)),
-    messages: [message, ...cachedPage.messages].slice(0, pageSize),
-  });
-}
-
-function createPageKey(topic, page) {
-  return `${topic}::${page}`;
-}
-
-function getMessagesPerPage() {
-  const value = Number(state.limits.messagesPerPage || 100);
-  return Number.isFinite(value) && value > 0 ? value : 100;
-}
-
-function getTopicChildrenPerPage() {
-  const value = Number(state.limits.topicChildrenPerPage || 200);
-  return Number.isFinite(value) && value > 0 ? value : 200;
-}
-
-function getVisibleChildrenCount(path) {
-  return state.visibleChildrenByPath.get(path) || getTopicChildrenPerPage();
-}
-
-function clampPage(page, totalPages) {
-  return Math.min(Math.max(page, 1), totalPages);
-}
-
-function latestDate(current, candidate) {
-  if (!current) return candidate;
-  if (!candidate) return current;
-  return new Date(candidate) > new Date(current) ? candidate : current;
-}
-
-function sortTreeNodes(a, b) {
-  return a.label.localeCompare(b.label, 'pt-BR', {
-    numeric: true,
-    sensitivity: 'base',
-  });
-}
-
-function formatPayload(message) {
-  if (message.payloadFormat !== 'json') {
-    return message.truncated ? `${message.payload}\n... payload truncado` : message.payload;
-  }
-
-  try {
-    const formatted = JSON.stringify(JSON.parse(message.payload), null, 2);
-    return message.truncated ? `${formatted}\n... payload truncado` : formatted;
-  } catch {
-    return message.payload;
-  }
-}
-
-function formatDate(value) {
-  if (!value) return '-';
-  return new Intl.DateTimeFormat('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date(value));
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
+setInterval(tick, 100);
