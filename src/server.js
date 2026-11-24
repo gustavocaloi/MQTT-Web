@@ -4,15 +4,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mqtt from 'mqtt';
 import { WebSocket, WebSocketServer } from 'ws';
+import { environmentConnection, publicConnection, validateConnection } from './mqtt-config.js';
+import { topicMatches } from '../public/topic-filter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT || 8080);
-const MQTT_URL = process.env.MQTT_URL || 'mqtt://localhost:1883';
-const MQTT_ROOT_FILTER = process.env.MQTT_ROOT_FILTER || process.env.MQTT_TOPIC || '#';
-const MQTT_USERNAME = process.env.MQTT_USERNAME || undefined;
-const MQTT_PASSWORD = process.env.MQTT_PASSWORD || undefined;
+let connection;
+let initialError = null;
+try { connection = environmentConnection(); }
+catch {
+  connection = environmentConnection({});
+  initialError = 'Configuracao MQTT do ambiente invalida.';
+}
 const MAX_MESSAGES_PER_TOPIC = Number(process.env.MAX_MESSAGES_PER_TOPIC || 100);
 const MESSAGES_PER_PAGE = Number(process.env.MESSAGES_PER_PAGE || 100);
 const TOPIC_CHILDREN_PER_PAGE = Number(process.env.TOPIC_CHILDREN_PER_PAGE || 200);
@@ -33,11 +38,12 @@ app.use('/vendor/diff', express.static(path.join(__dirname, '../node_modules/dif
 
 const state = {
   mqtt: {
-    url: sanitizeBrokerUrl(MQTT_URL),
-    topic: MQTT_ROOT_FILTER,
+    url: connection.url,
+    topic: connection.rootFilter,
+    configured: Boolean(connection.url),
     connected: false,
     reconnecting: false,
-    lastError: null,
+    lastError: initialError,
   },
   topics: new Map(),
   totalMessages: 0,
@@ -63,6 +69,33 @@ app.use('/img', express.static(imageDir, {
 
 app.get('/api/state', (_req, res) => {
   res.json(createSnapshot());
+});
+
+app.get('/api/connection', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(publicConnection(connection));
+});
+
+app.put('/api/connection', (req, res, next) => {
+  const origin = req.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).host !== req.get('host')) return res.status(403).json({ error: 'Origem nao permitida.' });
+    } catch { return res.status(403).json({ error: 'Origem nao permitida.' }); }
+  }
+  if (!req.is('application/json')) return res.status(415).json({ error: 'Envie os dados em JSON.' });
+  next();
+}, express.json({ limit: '16kb' }), (req, res) => {
+  let next;
+  try { next = validateConnection(req.body, connection); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
+  replaceConnection(next);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(publicConnection(connection));
+});
+
+app.use('/api/connection', (error, _req, res, _next) => {
+  res.status(error.status === 413 ? 413 : 400).json({ error: 'Dados de conexao invalidos.' });
 });
 
 app.get('/api/messages', (req, res) => {
@@ -113,69 +146,83 @@ wss.on('connection', (socket) => {
   socket.send(JSON.stringify({ type: 'snapshot', data: createSnapshot() }));
 });
 
-const client = mqtt.connect(MQTT_URL, {
-  username: MQTT_USERNAME,
-  password: MQTT_PASSWORD,
-  clientId: process.env.MQTT_CLIENT_ID || `mqtt-web-${Math.random().toString(16).slice(2)}`,
-  clean: process.env.MQTT_CLEAN !== 'false',
-  connectTimeout: Number(process.env.MQTT_CONNECT_TIMEOUT || 30_000),
-  reconnectPeriod: Number(process.env.MQTT_RECONNECT_PERIOD || 2_000),
-});
+let client = null;
 
-client.on('connect', () => {
-  state.mqtt.connected = true;
-  state.mqtt.reconnecting = false;
-  state.mqtt.lastError = null;
+function replaceConnection(next, reset = true) {
+  const old = client;
+  client = null;
+  old?.end(true);
+  connection = next;
+  state.mqtt = { url: next.url, topic: next.rootFilter, configured: Boolean(next.url), connected: false, reconnecting: false, lastError: reset ? null : initialError };
+  if (reset) {
+    clearMessages();
+    broadcast({ type: 'cleared', data: createSnapshot() });
+  }
+  if (!next.url) return;
+  const current = mqtt.connect(next.url, {
+    username: next.username || undefined,
+    password: next.password || undefined,
+    clientId: process.env.MQTT_CLIENT_ID || `mqtt-web-${Math.random().toString(16).slice(2)}`,
+    clean: process.env.MQTT_CLEAN !== 'false',
+    connectTimeout: Number(process.env.MQTT_CONNECT_TIMEOUT || 30_000),
+    reconnectPeriod: Number(process.env.MQTT_RECONNECT_PERIOD || 2_000),
+  });
+  client = current;
 
-  client.subscribe(MQTT_ROOT_FILTER, { qos: Number(process.env.MQTT_QOS || 0) }, (error) => {
-    if (error) {
-      updateMqttError(error);
-      return;
-    }
+  current.on('connect', () => {
+    if (client !== current) return;
+    state.mqtt.connected = true;
+    state.mqtt.reconnecting = false;
+    state.mqtt.lastError = null;
 
+    current.subscribe(next.rootFilter, { qos: next.qos }, (error, granted) => {
+      if (client !== current) return;
+      if (error || granted?.some(subscription => subscription.qos === 128)) {
+        updateMqttError();
+        return;
+      }
+      broadcast({ type: 'status', data: state.mqtt });
+    });
+  });
+
+  current.on('reconnect', () => {
+    if (client !== current) return;
+    state.mqtt.connected = false;
+    state.mqtt.reconnecting = true;
     broadcast({ type: 'status', data: state.mqtt });
   });
-});
 
-client.on('reconnect', () => {
-  state.mqtt.connected = false;
-  state.mqtt.reconnecting = true;
-  broadcast({ type: 'status', data: state.mqtt });
-});
+  for (const event of ['close', 'offline']) current.on(event, () => {
+    if (client !== current) return;
+    state.mqtt.connected = false;
+    broadcast({ type: 'status', data: state.mqtt });
+  });
 
-client.on('close', () => {
-  state.mqtt.connected = false;
-  broadcast({ type: 'status', data: state.mqtt });
-});
+  current.on('error', () => { if (client === current) updateMqttError(); });
 
-client.on('offline', () => {
-  state.mqtt.connected = false;
-  broadcast({ type: 'status', data: state.mqtt });
-});
+  current.on('message', (topic, payload, packet) => {
+    if (client !== current || !topicMatches(next.rootFilter, topic)) return;
+    const message = normalizeMessage(topic, payload, packet);
+    const topicState = state.topics.get(topic) || {
+      topic,
+      count: 0,
+      retainedCount: 0,
+      lastMessageAt: null,
+      messages: [],
+    };
+    topicState.count += 1;
+    topicState.retainedCount += message.retained ? 1 : 0;
+    topicState.lastMessageAt = message.receivedAt;
+    topicState.messages.unshift(message);
+    topicState.messages = topicState.messages.slice(0, MAX_MESSAGES_PER_TOPIC);
 
-client.on('error', updateMqttError);
+    state.totalMessages += 1;
+    state.topics.set(topic, topicState);
+    pendingTopics.set(topic, toTopicSummary(topicState));
+  });
+}
 
-client.on('message', (topic, payload, packet) => {
-  const message = normalizeMessage(topic, payload, packet);
-  const topicState = state.topics.get(topic) || {
-    topic,
-    count: 0,
-    retainedCount: 0,
-    lastMessageAt: null,
-    messages: [],
-  };
-
-  topicState.count += 1;
-  topicState.retainedCount += message.retained ? 1 : 0;
-  topicState.lastMessageAt = message.receivedAt;
-  topicState.messages.unshift(message);
-  topicState.messages = topicState.messages.slice(0, MAX_MESSAGES_PER_TOPIC);
-
-  state.totalMessages += 1;
-  state.topics.set(topic, topicState);
-
-  pendingTopics.set(topic, toTopicSummary(topicState));
-});
+replaceConnection(connection, false);
 
 // Coalesce busy topics and bound each WebSocket frame; history stays on the server.
 setInterval(() => {
@@ -187,12 +234,12 @@ setInterval(() => {
 
 server.listen(PORT, () => {
   console.log(`mqtt-web listening on port ${server.address().port}`);
-  console.log(`subscribing to ${MQTT_ROOT_FILTER} on ${sanitizeBrokerUrl(MQTT_URL)}`);
+  console.log(connection.url ? 'MQTT configurado pelo ambiente' : 'Aguardando configuracao MQTT pela interface');
 });
 
-function updateMqttError(error) {
+function updateMqttError() {
   state.mqtt.connected = false;
-  state.mqtt.lastError = error.message;
+  state.mqtt.lastError = 'Falha na conexao ou assinatura MQTT. Confira o broker, as credenciais e o filtro.';
   broadcast({ type: 'status', data: state.mqtt });
 }
 
@@ -281,16 +328,5 @@ function broadcast(payload) {
       }
       socket.send(data);
     }
-  }
-}
-
-function sanitizeBrokerUrl(value) {
-  try {
-    const url = new URL(value);
-    if (url.password) url.password = '***';
-    if (url.username) url.username = '***';
-    return url.toString();
-  } catch {
-    return value;
   }
 }

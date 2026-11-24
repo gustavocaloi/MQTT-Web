@@ -18,7 +18,7 @@ test('MQTT filters preserve case and empty levels', () => {
   ]) assert.equal(topicMatches(filter, topic), result);
 });
 
-test('live explorer, diff, pagination, bounded tree and reset', { timeout: 90000 }, async () => {
+test('live explorer, diff, pagination, bounded tree and reset', { timeout: 180000 }, async () => {
   const broker = await Aedes.createBroker();
   const tcp = net.createServer(broker.handle);
   tcp.listen(0, '127.0.0.1');
@@ -43,8 +43,12 @@ test('live explorer, diff, pagination, bounded tree and reset', { timeout: 90000
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(base);
     await expect(page.locator('#connectionStatus')).toHaveText('Conectado');
-    for (const label of ['factory', 'room', 'temperature', 'Payload']) await page.getByRole('button', { name: label, exact: true }).click();
+    await expect(page.locator('#connectionDialog')).toBeHidden();
+    for (const label of ['factory', 'room', 'temperature']) await page.getByRole('button', { name: label, exact: true }).click();
     await expect(page.locator('#selectedTopic')).toHaveText('factory/room/temperature');
+    await expect(page.locator('.tree-label').filter({ hasText: /^Payload$/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'temperature', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: 'temperature', exact: true })).not.toHaveAttribute('aria-expanded');
     await expect(page.locator('.code-line.add')).toContainText(['11']);
     await expect(page.locator('.code-line.remove')).toContainText(['10']);
     await expect(page.locator('#historyRows tr')).toHaveCount(5);
@@ -74,7 +78,7 @@ test('live explorer, diff, pagination, bounded tree and reset', { timeout: 90000
     }, 20);
     try {
       await page.locator('#searchInput').fill('factory/#');
-      await page.getByRole('button', { name: 'Payload', exact: true }).click({ timeout: 2000 });
+      await page.getByRole('button', { name: 'temperature', exact: true }).click({ timeout: 2000 });
       await page.locator('#payloadTab').click({ timeout: 2000 });
     } finally { clearInterval(flood); }
     await page.waitForTimeout(1300);
@@ -91,6 +95,22 @@ test('live explorer, diff, pagination, bounded tree and reset', { timeout: 90000
     await expect(page.locator('#detail')).toBeHidden();
     await publish('factory/room/temperature', { temperature: 1 });
     await expect(page.locator('#topicCount')).toHaveText('1');
+    await page.getByRole('button', { name: 'temperature', exact: true }).click();
+    await expect(page.locator('#selectedTopic')).toHaveText('factory/room/temperature');
+    await publish('factory/room/temperature/unit', 'C');
+    const temperature = page.getByRole('button', { name: 'temperature', exact: true });
+    await expect(temperature).toHaveAttribute('aria-expanded', 'false');
+    await temperature.click();
+    await page.getByRole('button', { name: 'unit', exact: true }).click();
+    await expect(page.locator('#selectedTopic')).toHaveText('factory/room/temperature/unit');
+    await temperature.click();
+    await expect(page.locator('#selectedTopic')).toHaveText('factory/room/temperature');
+    await page.locator('#searchInput').fill('factory');
+    await expect(page.locator('.tree-row')).toHaveCount(0);
+    await publish('factory', 'root message');
+    await page.getByRole('button', { name: 'factory', exact: true }).click();
+    await expect(page.locator('#selectedTopic')).toHaveText('factory');
+    await expect(page.locator('.tree-label').filter({ hasText: /^Payload$/ })).toHaveCount(0);
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

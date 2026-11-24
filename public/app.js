@@ -1,4 +1,5 @@
 import { validFilter, topicMatches } from './topic-filter.js';
+import { initializeConnectionDialog } from './connection-dialog.js';
 
 const $ = id => document.getElementById(id);
 const collator = new Intl.Collator('pt-BR', { numeric: true });
@@ -37,6 +38,7 @@ function upsert(topic, flash) {
   const old = state.topics.get(topic.topic);
   if (old && old.count >= topic.count) return;
   state.topics.set(topic.topic, topic);
+  if (!old) state.structureDirty = true;
   const parts = topic.topic.split('/');
   let node = root;
   for (let depth = 0; depth < parts.length; depth++) {
@@ -68,7 +70,7 @@ function snapshot(data) {
   if (cleared || (state.selected !== null && !state.topics.has(state.selected))) resetDetail();
   else if (state.selected !== null && state.follow) state.needsPage = true;
   showStatus(data.mqtt);
-  $('brokerUrl').textContent = data.mqtt.url;
+  $('brokerUrl').textContent = data.mqtt.url || 'Sem conexao configurada';
   $('brokerUrl').title = data.mqtt.url;
   $('topicFilter').textContent = data.mqtt.topic;
   tick();
@@ -115,11 +117,8 @@ function flatten() {
     const nodes = [...parent.children.values()].sort((a, b) => collator.compare(a.label, b.label) || a.path.localeCompare(b.path));
     for (const node of nodes) {
       if (visible && !visible.has(node.key)) continue;
-      rows.push({ key: node.key, node, depth, kind: 'branch' });
+      rows.push({ key: node.key, node, depth });
       if (!state.expanded.has(node.key)) continue;
-      if (node.topic !== undefined && (!state.query || topicMatches(state.query, node.topic))) {
-        rows.push({ key: 'payload:' + node.key, node, depth: depth + 1, kind: 'payload' });
-      }
       visit(node, depth + 1);
     }
   }
@@ -149,16 +148,16 @@ function renderTree() {
       label.className = 'tree-label';
       const count = document.createElement('span');
       count.className = 'tree-count';
-      toggle.append(icon(item.kind === 'payload' ? 'Braces' : 'ChevronRight'), label);
+      toggle.append(label);
       row.append(toggle, count, button('Filter', 'Filtrar ' + item.node.path, () => setFilter(item.node.path + '/#')));
       row.lastChild.classList.add('filter-button');
       toggle.onclick = () => {
-        if (item.kind === 'payload') selectTopic(item.node.topic);
-        else {
+        if (item.node.children.size) {
           state.expanded.has(item.node.key) ? state.expanded.delete(item.node.key) : state.expanded.add(item.node.key);
           state.structureDirty = true;
-          tick();
         }
+        if (item.node.topic !== undefined && (!state.query || topicMatches(state.query, item.node.topic)) && state.selected !== item.node.topic) selectTopic(item.node.topic);
+        else tick();
       };
       state.rows.set(item.key, row);
       $('treeRows').append(row);
@@ -167,15 +166,25 @@ function renderTree() {
     row.style.top = i * 36 + 'px';
     row.style.width = '100%';
     row.style.paddingLeft = (12 + Math.min(item.depth, 10) * 14) + 'px';
-    row.querySelector('.tree-label').textContent = item.kind === 'payload' ? 'Payload' : item.node.label;
-    row.querySelector('.tree-count').textContent = item.kind === 'payload' ? '' : item.node.count.toLocaleString('pt-BR');
+    row.querySelector('.tree-label').textContent = item.node.label;
+    row.querySelector('.tree-count').textContent = item.node.count.toLocaleString('pt-BR');
     row.querySelector('.tree-toggle').title = item.node.path;
     const toggle = row.querySelector('.tree-toggle');
-    if (item.kind === 'branch') {
+    const hasChildren = item.node.children.size > 0;
+    const hasMessages = item.node.topic !== undefined && (!state.query || topicMatches(state.query, item.node.topic));
+    const iconName = hasChildren ? 'ChevronRight' : 'Braces';
+    if (toggle.dataset.icon !== iconName) {
+      toggle.querySelector('svg')?.remove();
+      toggle.prepend(icon(iconName));
+      toggle.dataset.icon = iconName;
+    }
+    if (hasChildren) {
       toggle.setAttribute('aria-expanded', String(state.expanded.has(item.node.key)));
       toggle.querySelector('svg').style.transform = state.expanded.has(item.node.key) ? 'rotate(90deg)' : '';
-    } else toggle.setAttribute('aria-pressed', String(state.selected === item.node.topic));
-    row.classList.toggle('selected', item.kind === 'payload' && state.selected === item.node.topic);
+    } else toggle.removeAttribute('aria-expanded');
+    if (hasMessages) toggle.setAttribute('aria-pressed', String(state.selected === item.node.topic));
+    else toggle.removeAttribute('aria-pressed');
+    row.classList.toggle('selected', hasMessages && state.selected === item.node.topic);
     row.classList.toggle('active', item.node.flashUntil > performance.now());
   }
   for (const [key, row] of state.rows) if (!needed.has(key)) { row.remove(); state.rows.delete(key); }
@@ -395,4 +404,12 @@ $('copyButton').onclick = async () => {
 startWorker();
 theme();
 connect();
+initializeConnectionDialog({
+  onError: notice,
+  onApplied: () => {
+    state.expanded.clear();
+    setFilter('');
+    if (state.paused) $('pauseButton').click();
+  },
+});
 setInterval(tick, 100);
